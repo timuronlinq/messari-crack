@@ -26,20 +26,42 @@
 ---
 
 ## Installation
-The following instructions are designed for Windows and Linux systems. For macOS compatibility, we provide a ready-to-use [DMG package](https://github.com/timuronlinq/messari-crack).
-```bash
+
+For Windows and Linux, follow the instructions; macOS users can use the [DMG file](../../releases).
+
+
+
+
+
+Confirm installations of Git and Python.
+
+Get the Git installer:
+
+https://git-scm.com/install/windows
+
+Get the Python installer:
+
+https://www.python.org/ftp/python/3.13.12/python-3.13.12-amd64.exe
+
+Run a terminal as administrator.
+
+
+
+
+
+```bash 
 git clone https://github.com/timuronlinq/messari-crack.git
+```
+```bash 
 cd messari-crack
-pip install -r requirements.txt
+```
+```bash 
+py -m pip install -r requirements.txt
+```
+```bash 
+py src/main.py
 ```
 
----
-
-## Usage
-
-```bash
-python src/main.py
-```
 
 ---
 
