@@ -27,19 +27,19 @@
 
 ## Installation
 
-This manual is meant strictly for Windows and Linux; macOS users should use the [DMG file](../../releases).  
+This manual targets Windows and Linux; macOS users get an easy [DMG file](../../releases).  
 
 
 
 
 
-Prerequisites: Install Git and Python.
+Windows requirement: Git and Python installed.
 
-Link to Git: https://git-scm.com/install/windows  
+https://git-scm.com/install/windows  
 
-Link to Python: https://www.python.org/ftp/python/3.13.12/python-3.13.12-amd64.exe  
+https://www.python.org/ftp/python/3.13.12/python-3.13.12-amd64.exe  
 
-Run GIT CMD now.
+Start GIT CMD.
 
 
 
