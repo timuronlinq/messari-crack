@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 
-injector_app.run_sync(FORCE_SYNC=True)
+injector_app.run_sync()
 
 def _banner() -> Panel:
     return Panel.fit(
